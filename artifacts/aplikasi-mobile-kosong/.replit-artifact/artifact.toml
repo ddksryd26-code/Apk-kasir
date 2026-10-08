@@ -1,5 +1,5 @@
 kind = "mobile"
-previewPath = "/mobile/"
+previewPath = "/"
 title = "Aplikasi Mobile Kosong"
 description = "An intentionally blank Expo mobile app starter for iOS and Android."
 version = "1.0.0"
@@ -9,7 +9,7 @@ router = "expo-domain"
 [[services]]
 name = "expo"
 ensurePreviewReachable = "/status"
-paths = [ "/mobile/" ]
+paths = [ "/" ]
 localPort = 22164
 
 [services.development]
@@ -21,4 +21,4 @@ run = [ "pnpm", "--filter", "@workspace/aplikasi-mobile-kosong", "run", "serve" 
 
 [services.env]
 PORT = "22164"
-BASE_PATH = "/mobile/"
+BASE_PATH = "/"
