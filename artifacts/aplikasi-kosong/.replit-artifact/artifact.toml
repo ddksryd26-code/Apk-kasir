@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Aplikasi Kosong"
+description = "A blank web app starter with a running preview, ready for future development."
+version = "1.0.0"
+id = "artifacts/aplikasi-kosong"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 22052
+
+[services.development]
+run = "pnpm --filter @workspace/aplikasi-kosong run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/aplikasi-kosong", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/aplikasi-kosong/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "22052"
+BASE_PATH = "/"
