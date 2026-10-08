@@ -7,7 +7,7 @@ import { useColors } from '@/hooks/useColors';
 const settingsSections = [
   {
     id: 'stock',
-    title: 'Bikin Stok',
+    title: 'Stok',
     description: 'Catat dan kelola persediaan barang.',
     icon: 'cube-outline',
     emptyTitle: 'Belum ada stok',
@@ -15,7 +15,7 @@ const settingsSections = [
   },
   {
     id: 'menu',
-    title: 'Bikin Menu',
+    title: 'Menu',
     description: 'Atur item menu dan harga yang ditawarkan.',
     icon: 'restaurant-outline',
     emptyTitle: 'Belum ada menu',
