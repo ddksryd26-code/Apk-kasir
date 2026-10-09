@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useEffect, useRef, useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import {
   Modal,
@@ -68,6 +69,88 @@ interface CreatedItem {
 
 type ManageableSectionId = 'stock' | 'menu';
 type CreatedItems = Record<ManageableSectionId, CreatedItem[]>;
+type StorageLoadStatus = 'loading' | 'ready' | 'error';
+type StorageSaveStatus = 'saved' | 'saving' | 'error';
+
+const CREATED_ITEMS_STORAGE_KEY = 'ruang-usaha:created-items:v1';
+
+const isMenuCategory = (value: unknown): value is MenuCategory =>
+  value === 'Makanan' || value === 'Minuman' || value === 'Lainnya';
+
+const isDrinkSubcategory = (value: unknown): value is DrinkSubcategory =>
+  value === 'Es' || value === 'Panas';
+
+const isCreatedItem = (value: unknown): value is CreatedItem => {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  const item = value as Record<string, unknown>;
+  const validRecipe =
+    item.recipe === undefined ||
+    (Array.isArray(item.recipe) &&
+      item.recipe.every((ingredient) => {
+        if (
+          typeof ingredient !== 'object' ||
+          ingredient === null ||
+          Array.isArray(ingredient)
+        ) {
+          return false;
+        }
+        const entry = ingredient as Record<string, unknown>;
+        return (
+          typeof entry.stockId === 'string' &&
+          typeof entry.quantity === 'number' &&
+          Number.isFinite(entry.quantity) &&
+          entry.quantity > 0
+        );
+      }));
+  const validManualStock =
+    item.manualStock === undefined ||
+    (typeof item.manualStock === 'number' &&
+      Number.isInteger(item.manualStock) &&
+      item.manualStock >= 0);
+
+  return (
+    typeof item.id === 'string' &&
+    typeof item.name === 'string' &&
+    typeof item.amount === 'number' &&
+    Number.isFinite(item.amount) &&
+    item.amount >= 0 &&
+    (item.unit === undefined || typeof item.unit === 'string') &&
+    (item.category === undefined || isMenuCategory(item.category)) &&
+    (item.drinkSubcategory === undefined ||
+      isDrinkSubcategory(item.drinkSubcategory)) &&
+    validRecipe &&
+    validManualStock
+  );
+};
+
+const parseCreatedItems = (serialized: string): CreatedItems => {
+  const parsed: unknown = JSON.parse(serialized);
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    Array.isArray(parsed)
+  ) {
+    throw new Error('Format data stok dan menu tidak valid.');
+  }
+
+  const record = parsed as Record<string, unknown>;
+  if (
+    !Array.isArray(record.stock) ||
+    !Array.isArray(record.menu) ||
+    !record.stock.every(isCreatedItem) ||
+    !record.menu.every(isCreatedItem)
+  ) {
+    throw new Error('Format data stok dan menu tidak valid.');
+  }
+
+  return {
+    stock: record.stock,
+    menu: record.menu,
+  };
+};
 
 export default function SettingsScreen() {
   const colors = useColors();
@@ -90,6 +173,14 @@ export default function SettingsScreen() {
     stock: [],
     menu: [],
   });
+  const [storageLoadStatus, setStorageLoadStatus] =
+    useState<StorageLoadStatus>('loading');
+  const [storageSaveStatus, setStorageSaveStatus] =
+    useState<StorageSaveStatus>('saved');
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const createdItemsRef = useRef<CreatedItems>({ stock: [], menu: [] });
+  const persistenceQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const saveSequenceRef = useRef(0);
   const selectedSection = settingsSections.find(
     (section) => section.id === activeSection,
   );
@@ -142,6 +233,70 @@ export default function SettingsScreen() {
     setFormError('');
   };
 
+  useEffect(() => {
+    let isCurrent = true;
+
+    const loadCreatedItems = async () => {
+      setStorageLoadStatus('loading');
+      try {
+        const serialized = await AsyncStorage.getItem(
+          CREATED_ITEMS_STORAGE_KEY,
+        );
+        const storedItems = serialized
+          ? parseCreatedItems(serialized)
+          : { stock: [], menu: [] };
+        if (!isCurrent) return;
+
+        createdItemsRef.current = storedItems;
+        setCreatedItems(storedItems);
+        setStorageSaveStatus('saved');
+        setStorageLoadStatus('ready');
+      } catch {
+        if (!isCurrent) return;
+        setStorageLoadStatus('error');
+      }
+    };
+
+    void loadCreatedItems();
+    return () => {
+      isCurrent = false;
+    };
+  }, [loadAttempt]);
+
+  const persistCreatedItems = (items: CreatedItems) => {
+    const sequence = ++saveSequenceRef.current;
+    const serialized = JSON.stringify(items);
+    setStorageSaveStatus('saving');
+
+    const nextSave = persistenceQueueRef.current
+      .catch(() => undefined)
+      .then(() => AsyncStorage.setItem(CREATED_ITEMS_STORAGE_KEY, serialized))
+      .then(() => {
+        if (sequence === saveSequenceRef.current) {
+          setStorageSaveStatus('saved');
+        }
+      })
+      .catch(() => {
+        if (sequence === saveSequenceRef.current) {
+          setStorageSaveStatus('error');
+        }
+      });
+
+    persistenceQueueRef.current = nextSave;
+    return nextSave;
+  };
+
+  const updateCreatedItems = (
+    update: (current: CreatedItems) => CreatedItems,
+  ) => {
+    if (storageLoadStatus !== 'ready') return;
+
+    const nextItems = update(createdItemsRef.current);
+    createdItemsRef.current = nextItems;
+    setCreatedItems(nextItems);
+    void persistCreatedItems(nextItems);
+  };
+
   const handleBack = () => {
     if (isCreating) {
       setIsCreating(false);
@@ -153,6 +308,7 @@ export default function SettingsScreen() {
 
   const handleCreate = () => {
     if (
+      storageLoadStatus !== 'ready' ||
       !selectedSection ||
       (selectedSection.id !== 'stock' && selectedSection.id !== 'menu')
     ) {
@@ -168,7 +324,7 @@ export default function SettingsScreen() {
     if (editingStockId) {
       if (selectedSection.id !== 'stock') return;
       const stockId = editingStockId;
-      setCreatedItems((current) => ({
+      updateCreatedItems((current) => ({
         ...current,
         stock: current.stock.map((item) =>
           item.id === stockId ? { ...item, name } : item,
@@ -197,7 +353,7 @@ export default function SettingsScreen() {
         amount,
         unit: itemUnit.trim() || 'unit',
       };
-      setCreatedItems((current) => ({
+      updateCreatedItems((current) => ({
         ...current,
         stock: [...current.stock, stockItem],
       }));
@@ -247,7 +403,7 @@ export default function SettingsScreen() {
           : {}),
         ...(recipe.length > 0 ? { recipe } : { manualStock }),
       };
-      setCreatedItems((current) => ({
+      updateCreatedItems((current) => ({
         ...current,
         menu: [...current.menu, menuItem],
       }));
@@ -258,11 +414,13 @@ export default function SettingsScreen() {
   };
 
   const openCreateForm = () => {
+    if (storageLoadStatus !== 'ready') return;
     resetForm();
     setIsCreating(true);
   };
 
   const beginRenameStock = (item: CreatedItem) => {
+    if (storageLoadStatus !== 'ready') return;
     setEditingStockId(item.id);
     setItemName(item.name);
     setItemAmount(String(item.amount));
@@ -295,7 +453,7 @@ export default function SettingsScreen() {
   };
 
   const adjustStock = (stockId: string, change: 1 | -1) => {
-    setCreatedItems((current) => ({
+    updateCreatedItems((current) => ({
       ...current,
       stock: current.stock.map((item) =>
         item.id === stockId
@@ -306,9 +464,9 @@ export default function SettingsScreen() {
   };
 
   const confirmDeleteStock = () => {
-    if (!pendingDeleteStock) return;
+    if (!pendingDeleteStock || storageLoadStatus !== 'ready') return;
     const stockId = pendingDeleteStock.id;
-    setCreatedItems((current) => ({
+    updateCreatedItems((current) => ({
       ...current,
       stock: current.stock.filter((item) => item.id !== stockId),
     }));
@@ -322,10 +480,12 @@ export default function SettingsScreen() {
         accessibilityLabel={
           selectedSection?.id === 'stock' ? 'Tambah stok' : 'Tambah menu'
         }
+        disabled={storageLoadStatus !== 'ready'}
         onPress={openCreateForm}
         style={({ pressed }) => [
           styles.floatingButton,
           { backgroundColor: colors.primary },
+          storageLoadStatus !== 'ready' && styles.disabledButton,
           pressed && styles.pressed,
         ]}
         testID={`settings-create-${selectedSection?.id}`}
@@ -361,6 +521,83 @@ export default function SettingsScreen() {
               {isCreating ? selectedSection.title : 'Pengaturan'}
             </Text>
           </Pressable>
+
+          {selectedSection.id === 'stock' || selectedSection.id === 'menu' ? (
+            <View
+              style={[
+                styles.storageStatus,
+                { backgroundColor: colors.secondary },
+              ]}
+            >
+              <Ionicons
+                name={
+                  storageLoadStatus === 'error' ||
+                  storageSaveStatus === 'error'
+                    ? 'alert-circle-outline'
+                    : storageLoadStatus === 'loading' ||
+                        storageSaveStatus === 'saving'
+                      ? 'sync-outline'
+                      : 'checkmark-circle-outline'
+                }
+                size={17}
+                color={
+                  storageLoadStatus === 'error' ||
+                  storageSaveStatus === 'error'
+                    ? colors.destructive
+                    : colors.primary
+                }
+              />
+              <View style={styles.storageStatusCopy}>
+                <Text
+                  accessibilityRole={
+                    storageLoadStatus === 'error' ||
+                    storageSaveStatus === 'error'
+                      ? 'alert'
+                      : undefined
+                  }
+                  style={[
+                    styles.storageStatusText,
+                    {
+                      color:
+                        storageLoadStatus === 'error' ||
+                        storageSaveStatus === 'error'
+                          ? colors.destructive
+                          : colors.mutedForeground,
+                    },
+                  ]}
+                >
+                  {storageLoadStatus === 'loading'
+                    ? 'Memuat data stok dan menu...'
+                    : storageLoadStatus === 'error'
+                      ? 'Data tidak bisa dibaca. Data lokal belum diubah.'
+                      : storageSaveStatus === 'saving'
+                        ? 'Menyimpan perubahan...'
+                        : storageSaveStatus === 'error'
+                          ? 'Perubahan belum tersimpan.'
+                          : 'Data tersimpan di perangkat.'}
+                </Text>
+                {storageLoadStatus === 'error' ||
+                storageSaveStatus === 'error' ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={() => {
+                      if (storageLoadStatus === 'error') {
+                        setStorageLoadStatus('loading');
+                        setLoadAttempt((current) => current + 1);
+                      } else {
+                        void persistCreatedItems(createdItemsRef.current);
+                      }
+                    }}
+                    style={styles.storageRetryButton}
+                  >
+                    <Text style={[styles.storageRetryText, { color: colors.primary }]}>
+                      Coba lagi
+                    </Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            </View>
+          ) : null}
 
           {isCreating ? (
             <View
@@ -903,6 +1140,35 @@ const styles = StyleSheet.create({
     fontFamily: 'Inter_600SemiBold',
     fontSize: 13,
     marginLeft: 8,
+  },
+  storageStatus: {
+    alignItems: 'flex-start',
+    borderRadius: 12,
+    flexDirection: 'row',
+    gap: 9,
+    marginBottom: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  storageStatusCopy: {
+    alignItems: 'center',
+    flex: 1,
+    flexDirection: 'row',
+    gap: 8,
+    justifyContent: 'space-between',
+  },
+  storageStatusText: {
+    flex: 1,
+    fontFamily: 'Inter_500Medium',
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  storageRetryButton: {
+    paddingVertical: 2,
+  },
+  storageRetryText: {
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 11,
   },
   floatingButton: {
     alignItems: 'center',
