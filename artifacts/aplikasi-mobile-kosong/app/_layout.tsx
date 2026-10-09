@@ -11,6 +11,7 @@ import { Tabs } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { Platform, StyleSheet, View, useColorScheme } from 'react-native';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
+import { CreatedItemsProvider } from '@/contexts/CreatedItemsContext';
 import { useColors } from '@/hooks/useColors';
 import {
   Inter_400Regular,
@@ -181,7 +182,9 @@ export default function RootLayout() {
         <QueryClientProvider client={queryClient}>
           <GestureHandlerRootView style={{ flex: 1 }}>
             <KeyboardProvider>
-              <RootLayoutNav />
+              <CreatedItemsProvider>
+                <RootLayoutNav />
+              </CreatedItemsProvider>
             </KeyboardProvider>
           </GestureHandlerRootView>
         </QueryClientProvider>

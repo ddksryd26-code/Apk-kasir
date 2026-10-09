@@ -1,5 +1,4 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import {
   Modal,
@@ -14,8 +13,12 @@ import {
   MenuCompositionFields,
   type DrinkSubcategory,
   type MenuCategory,
-  type RecipeIngredient,
 } from '@/components/MenuCompositionFields';
+import {
+  getMenuAvailableStock,
+  useCreatedItems,
+  type CreatedItem,
+} from '@/contexts/CreatedItemsContext';
 import { SectionPage } from '@/components/SectionPage';
 import { useColors } from '@/hooks/useColors';
 
@@ -56,104 +59,16 @@ const settingsSections = [
 
 type SettingsSectionId = (typeof settingsSections)[number]['id'];
 
-interface CreatedItem {
-  id: string;
-  name: string;
-  amount: number;
-  unit?: string;
-  category?: MenuCategory;
-  drinkSubcategory?: DrinkSubcategory;
-  recipe?: RecipeIngredient[];
-  manualStock?: number;
-}
-
-type ManageableSectionId = 'stock' | 'menu';
-type CreatedItems = Record<ManageableSectionId, CreatedItem[]>;
-type StorageLoadStatus = 'loading' | 'ready' | 'error';
-type StorageSaveStatus = 'saved' | 'saving' | 'error';
-
-const CREATED_ITEMS_STORAGE_KEY = 'ruang-usaha:created-items:v1';
-
-const isMenuCategory = (value: unknown): value is MenuCategory =>
-  value === 'Makanan' || value === 'Minuman' || value === 'Lainnya';
-
-const isDrinkSubcategory = (value: unknown): value is DrinkSubcategory =>
-  value === 'Es' || value === 'Panas';
-
-const isCreatedItem = (value: unknown): value is CreatedItem => {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return false;
-  }
-
-  const item = value as Record<string, unknown>;
-  const validRecipe =
-    item.recipe === undefined ||
-    (Array.isArray(item.recipe) &&
-      item.recipe.every((ingredient) => {
-        if (
-          typeof ingredient !== 'object' ||
-          ingredient === null ||
-          Array.isArray(ingredient)
-        ) {
-          return false;
-        }
-        const entry = ingredient as Record<string, unknown>;
-        return (
-          typeof entry.stockId === 'string' &&
-          typeof entry.quantity === 'number' &&
-          Number.isFinite(entry.quantity) &&
-          entry.quantity > 0
-        );
-      }));
-  const validManualStock =
-    item.manualStock === undefined ||
-    (typeof item.manualStock === 'number' &&
-      Number.isInteger(item.manualStock) &&
-      item.manualStock >= 0);
-
-  return (
-    typeof item.id === 'string' &&
-    typeof item.name === 'string' &&
-    typeof item.amount === 'number' &&
-    Number.isFinite(item.amount) &&
-    item.amount >= 0 &&
-    (item.unit === undefined || typeof item.unit === 'string') &&
-    (item.category === undefined || isMenuCategory(item.category)) &&
-    (item.drinkSubcategory === undefined ||
-      isDrinkSubcategory(item.drinkSubcategory)) &&
-    validRecipe &&
-    validManualStock
-  );
-};
-
-const parseCreatedItems = (serialized: string): CreatedItems => {
-  const parsed: unknown = JSON.parse(serialized);
-  if (
-    typeof parsed !== 'object' ||
-    parsed === null ||
-    Array.isArray(parsed)
-  ) {
-    throw new Error('Format data stok dan menu tidak valid.');
-  }
-
-  const record = parsed as Record<string, unknown>;
-  if (
-    !Array.isArray(record.stock) ||
-    !Array.isArray(record.menu) ||
-    !record.stock.every(isCreatedItem) ||
-    !record.menu.every(isCreatedItem)
-  ) {
-    throw new Error('Format data stok dan menu tidak valid.');
-  }
-
-  return {
-    stock: record.stock,
-    menu: record.menu,
-  };
-};
-
 export default function SettingsScreen() {
   const colors = useColors();
+  const {
+    createdItems,
+    storageLoadStatus,
+    storageSaveStatus,
+    updateCreatedItems,
+    retryLoadCreatedItems,
+    retrySaveCreatedItems,
+  } = useCreatedItems();
   const [activeSection, setActiveSection] = useState<SettingsSectionId | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [editingStockId, setEditingStockId] = useState<string | null>(null);
@@ -169,18 +84,6 @@ export default function SettingsScreen() {
   const [formError, setFormError] = useState('');
   const [pendingDeleteStock, setPendingDeleteStock] =
     useState<CreatedItem | null>(null);
-  const [createdItems, setCreatedItems] = useState<CreatedItems>({
-    stock: [],
-    menu: [],
-  });
-  const [storageLoadStatus, setStorageLoadStatus] =
-    useState<StorageLoadStatus>('loading');
-  const [storageSaveStatus, setStorageSaveStatus] =
-    useState<StorageSaveStatus>('saved');
-  const [loadAttempt, setLoadAttempt] = useState(0);
-  const createdItemsRef = useRef<CreatedItems>({ stock: [], menu: [] });
-  const persistenceQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const saveSequenceRef = useRef(0);
   const selectedSection = settingsSections.find(
     (section) => section.id === activeSection,
   );
@@ -231,70 +134,6 @@ export default function SettingsScreen() {
     setRecipeUsages({});
     setManualMenuStock('');
     setFormError('');
-  };
-
-  useEffect(() => {
-    let isCurrent = true;
-
-    const loadCreatedItems = async () => {
-      setStorageLoadStatus('loading');
-      try {
-        const serialized = await AsyncStorage.getItem(
-          CREATED_ITEMS_STORAGE_KEY,
-        );
-        const storedItems = serialized
-          ? parseCreatedItems(serialized)
-          : { stock: [], menu: [] };
-        if (!isCurrent) return;
-
-        createdItemsRef.current = storedItems;
-        setCreatedItems(storedItems);
-        setStorageSaveStatus('saved');
-        setStorageLoadStatus('ready');
-      } catch {
-        if (!isCurrent) return;
-        setStorageLoadStatus('error');
-      }
-    };
-
-    void loadCreatedItems();
-    return () => {
-      isCurrent = false;
-    };
-  }, [loadAttempt]);
-
-  const persistCreatedItems = (items: CreatedItems) => {
-    const sequence = ++saveSequenceRef.current;
-    const serialized = JSON.stringify(items);
-    setStorageSaveStatus('saving');
-
-    const nextSave = persistenceQueueRef.current
-      .catch(() => undefined)
-      .then(() => AsyncStorage.setItem(CREATED_ITEMS_STORAGE_KEY, serialized))
-      .then(() => {
-        if (sequence === saveSequenceRef.current) {
-          setStorageSaveStatus('saved');
-        }
-      })
-      .catch(() => {
-        if (sequence === saveSequenceRef.current) {
-          setStorageSaveStatus('error');
-        }
-      });
-
-    persistenceQueueRef.current = nextSave;
-    return nextSave;
-  };
-
-  const updateCreatedItems = (
-    update: (current: CreatedItems) => CreatedItems,
-  ) => {
-    if (storageLoadStatus !== 'ready') return;
-
-    const nextItems = update(createdItemsRef.current);
-    createdItemsRef.current = nextItems;
-    setCreatedItems(nextItems);
-    void persistCreatedItems(nextItems);
   };
 
   const handleBack = () => {
@@ -438,20 +277,6 @@ export default function SettingsScreen() {
     setFormError('');
   };
 
-  const getMenuAvailableStock = (item: CreatedItem) => {
-    if (!item.recipe?.length) return item.manualStock ?? 0;
-
-    const productionLimits = item.recipe.map((ingredient) => {
-      const stockItem = createdItems.stock.find(
-        (stock) => stock.id === ingredient.stockId,
-      );
-      return stockItem
-        ? Math.floor(stockItem.amount / ingredient.quantity)
-        : 0;
-    });
-    return Math.max(0, Math.min(...productionLimits));
-  };
-
   const adjustStock = (stockId: string, change: 1 | -1) => {
     updateCreatedItems((current) => ({
       ...current,
@@ -582,10 +407,9 @@ export default function SettingsScreen() {
                     accessibilityRole="button"
                     onPress={() => {
                       if (storageLoadStatus === 'error') {
-                        setStorageLoadStatus('loading');
-                        setLoadAttempt((current) => current + 1);
+                        retryLoadCreatedItems();
                       } else {
-                        void persistCreatedItems(createdItemsRef.current);
+                        retrySaveCreatedItems();
                       }
                     }}
                     style={styles.storageRetryButton}
@@ -849,7 +673,7 @@ export default function SettingsScreen() {
                                 ? ` · ${item.drinkSubcategory}`
                                 : ''}
                               {' · Stok '}
-                              {getMenuAvailableStock(item).toLocaleString('id-ID')}
+                              {getMenuAvailableStock(item, createdItems.stock).toLocaleString('id-ID')}
                             </Text>
                           </>
                         )}
