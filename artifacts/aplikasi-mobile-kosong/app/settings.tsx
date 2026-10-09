@@ -8,6 +8,13 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import {
+  formatMenuDisplayName,
+  MenuCompositionFields,
+  type DrinkSubcategory,
+  type MenuCategory,
+  type RecipeIngredient,
+} from '@/components/MenuCompositionFields';
 import { SectionPage } from '@/components/SectionPage';
 import { useColors } from '@/hooks/useColors';
 
@@ -53,6 +60,10 @@ interface CreatedItem {
   name: string;
   amount: number;
   unit?: string;
+  category?: MenuCategory;
+  drinkSubcategory?: DrinkSubcategory;
+  recipe?: RecipeIngredient[];
+  manualStock?: number;
 }
 
 type ManageableSectionId = 'stock' | 'menu';
@@ -66,6 +77,12 @@ export default function SettingsScreen() {
   const [itemName, setItemName] = useState('');
   const [itemAmount, setItemAmount] = useState('');
   const [itemUnit, setItemUnit] = useState('pcs');
+  const [menuCategory, setMenuCategory] = useState<MenuCategory>('Makanan');
+  const [drinkSubcategory, setDrinkSubcategory] =
+    useState<DrinkSubcategory | null>(null);
+  const [selectedRecipeStockIds, setSelectedRecipeStockIds] = useState<string[]>([]);
+  const [recipeUsages, setRecipeUsages] = useState<Record<string, string>>({});
+  const [manualMenuStock, setManualMenuStock] = useState('');
   const [formError, setFormError] = useState('');
   const [pendingDeleteStock, setPendingDeleteStock] =
     useState<CreatedItem | null>(null);
@@ -84,6 +101,18 @@ export default function SettingsScreen() {
       : selectedSection?.id === 'menu'
         ? createdItems.menu
         : [];
+  const recipeStockLimits = selectedRecipeStockIds.map((stockId) => {
+    const stockItem = createdItems.stock.find((item) => item.id === stockId);
+    const usage = Number((recipeUsages[stockId] ?? '').trim().replace(',', '.'));
+    return !stockItem || !Number.isFinite(usage) || usage <= 0
+      ? null
+      : Math.floor(stockItem.amount / usage);
+  });
+  const estimatedMenuStock =
+    recipeStockLimits.length > 0 &&
+    recipeStockLimits.every((limit): limit is number => limit !== null)
+      ? Math.min(...recipeStockLimits)
+      : null;
   const pageTitle = isCreating
     ? editingStockId
       ? 'Ganti Nama Stok'
@@ -96,7 +125,7 @@ export default function SettingsScreen() {
       ? 'Ubah nama stok tanpa mengubah jumlahnya.'
       : selectedSection?.id === 'stock'
         ? 'Isi nama barang dan jumlah stok.'
-        : 'Isi nama menu dan harga jual.'
+        : 'Atur nama, kategori, harga, dan stok menu.'
     : selectedSection?.description ??
       'Kelola menu, persediaan, staff, dan laporan usaha.';
 
@@ -105,6 +134,11 @@ export default function SettingsScreen() {
     setItemName('');
     setItemAmount('');
     setItemUnit('pcs');
+    setMenuCategory('Makanan');
+    setDrinkSubcategory(null);
+    setSelectedRecipeStockIds([]);
+    setRecipeUsages({});
+    setManualMenuStock('');
     setFormError('');
   };
 
@@ -155,20 +189,70 @@ export default function SettingsScreen() {
       return;
     }
 
-    const item: CreatedItem = {
-      id: Date.now().toString(),
-      name,
-      amount,
-      ...(selectedSection.id === 'stock'
-        ? { unit: itemUnit.trim() || 'unit' }
-        : {}),
-    };
+    const id = Date.now().toString();
+    if (selectedSection.id === 'stock') {
+      const stockItem: CreatedItem = {
+        id,
+        name,
+        amount,
+        unit: itemUnit.trim() || 'unit',
+      };
+      setCreatedItems((current) => ({
+        ...current,
+        stock: [...current.stock, stockItem],
+      }));
+    } else {
+      if (menuCategory === 'Minuman' && !drinkSubcategory) {
+        setFormError('Pilih subkategori Es atau Panas.');
+        return;
+      }
 
-    setCreatedItems((current) =>
-      selectedSection.id === 'stock'
-        ? { ...current, stock: [...current.stock, item] }
-        : { ...current, menu: [...current.menu, item] },
-    );
+      const recipe = selectedRecipeStockIds.map((stockId) => ({
+        stockId,
+        quantity: Number((recipeUsages[stockId] ?? '').trim().replace(',', '.')),
+      }));
+
+      if (recipe.length > 0) {
+        const hasInvalidIngredient = recipe.some(
+          (ingredient) =>
+            !createdItems.stock.some((stock) => stock.id === ingredient.stockId) ||
+            !Number.isFinite(ingredient.quantity) ||
+            ingredient.quantity <= 0,
+        );
+        if (hasInvalidIngredient) {
+          setFormError('Masukkan takaran yang valid untuk setiap stok penyusunan.');
+          return;
+        }
+      }
+
+      const manualStock = Number(manualMenuStock.trim());
+      if (
+        recipe.length === 0 &&
+        (!manualMenuStock.trim() ||
+          !Number.isInteger(manualStock) ||
+          !Number.isFinite(manualStock) ||
+          manualStock < 0)
+      ) {
+        setFormError('Masukkan jumlah stok menu manual yang valid.');
+        return;
+      }
+
+      const menuItem: CreatedItem = {
+        id,
+        name: formatMenuDisplayName(name, menuCategory, drinkSubcategory),
+        amount,
+        category: menuCategory,
+        ...(menuCategory === 'Minuman' && drinkSubcategory
+          ? { drinkSubcategory }
+          : {}),
+        ...(recipe.length > 0 ? { recipe } : { manualStock }),
+      };
+      setCreatedItems((current) => ({
+        ...current,
+        menu: [...current.menu, menuItem],
+      }));
+    }
+
     setIsCreating(false);
     resetForm();
   };
@@ -185,6 +269,29 @@ export default function SettingsScreen() {
     setItemUnit(item.unit ?? 'pcs');
     setFormError('');
     setIsCreating(true);
+  };
+
+  const toggleRecipeStock = (stockId: string) => {
+    setSelectedRecipeStockIds((current) =>
+      current.includes(stockId)
+        ? current.filter((id) => id !== stockId)
+        : [...current, stockId],
+    );
+    setFormError('');
+  };
+
+  const getMenuAvailableStock = (item: CreatedItem) => {
+    if (!item.recipe?.length) return item.manualStock ?? 0;
+
+    const productionLimits = item.recipe.map((ingredient) => {
+      const stockItem = createdItems.stock.find(
+        (stock) => stock.id === ingredient.stockId,
+      );
+      return stockItem
+        ? Math.floor(stockItem.amount / ingredient.quantity)
+        : 0;
+    });
+    return Math.max(0, Math.min(...productionLimits));
   };
 
   const adjustStock = (stockId: string, change: 1 | -1) => {
@@ -305,6 +412,40 @@ export default function SettingsScreen() {
                   value={itemName}
                 />
               </View>
+
+              {!editingStockId && selectedSection.id === 'menu' ? (
+                <MenuCompositionFields
+                  name={itemName}
+                  category={menuCategory}
+                  onCategoryChange={(category) => {
+                    setMenuCategory(category);
+                    if (category !== 'Minuman') setDrinkSubcategory(null);
+                    setFormError('');
+                  }}
+                  drinkSubcategory={drinkSubcategory}
+                  onDrinkSubcategoryChange={(subcategory) => {
+                    setDrinkSubcategory(subcategory);
+                    setFormError('');
+                  }}
+                  stocks={createdItems.stock}
+                  selectedStockIds={selectedRecipeStockIds}
+                  onToggleStock={toggleRecipeStock}
+                  stockUsages={recipeUsages}
+                  onStockUsageChange={(stockId, value) => {
+                    setRecipeUsages((current) => ({
+                      ...current,
+                      [stockId]: value,
+                    }));
+                    setFormError('');
+                  }}
+                  manualStock={manualMenuStock}
+                  onManualStockChange={(value) => {
+                    setManualMenuStock(value);
+                    setFormError('');
+                  }}
+                  estimatedStock={estimatedMenuStock}
+                />
+              ) : null}
 
               {!editingStockId ? (
                 <>
@@ -440,11 +581,41 @@ export default function SettingsScreen() {
                         <Text style={[styles.menuTitle, { color: colors.foreground }]}>
                           {item.name}
                         </Text>
-                        <Text style={[styles.menuDescription, { color: colors.mutedForeground }]}>
-                          {isStockItem
-                            ? `${item.amount.toLocaleString('id-ID')} ${item.unit ?? 'unit'}`
-                            : `Rp ${item.amount.toLocaleString('id-ID')}`}
-                        </Text>
+                        {isStockItem ? (
+                          <Text
+                            style={[
+                              styles.menuDescription,
+                              { color: colors.mutedForeground },
+                            ]}
+                          >
+                            {item.amount.toLocaleString('id-ID')} {item.unit ?? 'unit'}
+                          </Text>
+                        ) : (
+                          <>
+                            <Text
+                              style={[
+                                styles.menuDescription,
+                                { color: colors.mutedForeground },
+                              ]}
+                            >
+                              Rp {item.amount.toLocaleString('id-ID')}
+                            </Text>
+                            <Text
+                              style={[
+                                styles.menuDescription,
+                                styles.menuMetadata,
+                                { color: colors.mutedForeground },
+                              ]}
+                            >
+                              {item.category ?? 'Lainnya'}
+                              {item.drinkSubcategory
+                                ? ` · ${item.drinkSubcategory}`
+                                : ''}
+                              {' · Stok '}
+                              {getMenuAvailableStock(item).toLocaleString('id-ID')}
+                            </Text>
+                          </>
+                        )}
                       </View>
                     </View>
                     {isStockItem ? (
@@ -712,6 +883,10 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 17,
     marginTop: 4,
+  },
+  menuMetadata: {
+    fontSize: 11,
+    marginTop: 2,
   },
   divider: {
     height: StyleSheet.hairlineWidth,
